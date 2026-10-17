@@ -233,24 +233,43 @@ with st.sidebar:
 
         st.write("")
         
-        # PDF Upload Controls
+        # Initialize uploader key in session state
+        if "uploader_key" not in st.session_state:
+            st.session_state["uploader_key"] = 0
+
+        # One-time upload notification (consumed on display to prevent repeating across reruns)
+        if "upload_notice" in st.session_state:
+            notice_type, notice_text = st.session_state.pop("upload_notice")
+            if notice_type == "warning":
+                st.warning(notice_text)
+            elif notice_type == "success":
+                st.success(notice_text)
+            elif notice_type == "error":
+                st.error(notice_text)
+
+        # PDF Upload Controls with dynamic key rotation for clean state management
+        uploader_widget_key = f"pdf_uploader_{st.session_state['uploader_key']}"
         uploaded_files = st.file_uploader(
             "Upload PDF files",
             type=["pdf"],
             accept_multiple_files=True,
             help="Upload one or more text-based PDFs to add to the knowledge base.",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            key=uploader_widget_key,
         )
         if uploaded_files:
             saved_files = []
-            errors = []
+            has_sensitive = False
+            has_invalid_type = False
+            save_error = None
+
             for file in uploaded_files:
                 safe_name = os.path.basename(file.name).strip()
                 if not safe_name.lower().endswith(".pdf"):
-                    errors.append(f"'{safe_name}': Only PDF files are supported.")
+                    has_invalid_type = True
                     continue
                 if is_sensitive_document(safe_name):
-                    errors.append(f"'{safe_name}': Personal documents (CVs, resumes, certificates) cannot be added to the public knowledge base.")
+                    has_sensitive = True
                     continue
                 try:
                     target_path = DATA_DIR / safe_name
@@ -258,11 +277,36 @@ with st.sidebar:
                         f.write(file.getbuffer())
                     saved_files.append(safe_name)
                 except Exception as e:
-                    errors.append(f"{safe_name}: {e}")
+                    save_error = str(e)
+
+            # Construct one-time notification without exposing personal filenames
+            messages = []
+            notice_type = "info"
+
             if saved_files:
-                st.success(f"Added {len(saved_files)} file(s). Click Rebuild Index below.")
-            if errors:
-                st.warning("Upload notice:\n" + "\n".join(errors))
+                messages.append(f"✅ Added {len(saved_files)} valid file(s). Click Rebuild Index below.")
+                notice_type = "success"
+
+            if has_sensitive:
+                messages.append("⚠️ Personal documents (CVs, resumes, certificates) cannot be added to the public knowledge base and were skipped.")
+                if not saved_files:
+                    notice_type = "warning"
+
+            if has_invalid_type:
+                messages.append("⚠️ Non-PDF file(s) were skipped (only PDFs are supported).")
+                if not saved_files and not has_sensitive:
+                    notice_type = "warning"
+
+            if save_error:
+                messages.append(f"❌ Upload error: {save_error}")
+                notice_type = "error"
+
+            if messages:
+                st.session_state["upload_notice"] = (notice_type, "\n\n".join(messages))
+
+            # Rotate key and rerun to clear upload widget state safely
+            st.session_state["uploader_key"] += 1
+            st.rerun()
 
         # Rebuild Index Button
         if st.button("🔨 Build / Rebuild Index", type="primary", use_container_width=True):
