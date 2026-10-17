@@ -16,7 +16,13 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
-from vectorize_documents import build_vectorstore, load_vectorstore, DATA_DIR, DB_DIR
+from vectorize_documents import (
+    build_vectorstore,
+    load_vectorstore,
+    DATA_DIR,
+    get_db_dir,
+    COLLECTION_NAME,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 # Load .env file directly from this project directory with override enabled
@@ -125,7 +131,8 @@ def format_source_page(doc):
 DATA_DIR.mkdir(exist_ok=True)
 current_pdfs = sorted(list(DATA_DIR.glob("*.pdf")), key=lambda p: p.name.lower())
 pdf_count = len(current_pdfs)
-index_ready = DB_DIR.exists() and any(DB_DIR.iterdir())
+active_db_dir = get_db_dir()
+index_ready = active_db_dir.exists() and any(active_db_dir.iterdir())
 has_api_key = bool(groq_api_key)
 
 # Sidebar: Mode Selector & Documents Panel
@@ -223,7 +230,8 @@ with st.sidebar:
         st.markdown("**LLM Engine:** `openai/gpt-oss-20b` (Groq)")
         if chat_mode == "Document Chat (RAG)":
             st.markdown("**Embeddings:** `all-MiniLM-L6-v2` (Local)")
-            st.markdown(f"**Storage:** Chroma DB (`vector_db_dir/`)")
+            st.markdown(f"**Storage:** Chroma DB (`{active_db_dir.name}/`)")
+            st.markdown(f"**Collection:** `{COLLECTION_NAME}`")
         if has_api_key:
             st.markdown("**API Key:** Configured (`.env` / secrets)")
         else:
