@@ -1,4 +1,6 @@
 import os
+import uuid
+import tempfile
 from pathlib import Path
 import streamlit as st
 
@@ -16,17 +18,17 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
+
 try:
     from vectorize_documents import (
-        build_vectorstore,
-        load_vectorstore,
-        DATA_DIR,
-        get_db_dir,
-        COLLECTION_NAME,
-        get_indexed_pdfs,
+        build_session_vectorstore,
+        load_session_vectorstore,
+        get_session_documents,
+        clear_session_data,
         is_sensitive_document,
-        reset_to_demo_documents,
-        DEMO_DOCUMENTS,
+        EMBEDDING_MODEL,
+        DEFAULT_COLLECTION_NAME,
+        get_indexed_pdfs,
     )
 except ImportError:
     import importlib
@@ -35,68 +37,16 @@ except ImportError:
         importlib.reload(vectorize_documents)
     except Exception:
         pass
-    try:
-        from vectorize_documents import (
-            build_vectorstore,
-            load_vectorstore,
-            DATA_DIR,
-            get_db_dir,
-            COLLECTION_NAME,
-            get_indexed_pdfs,
-            is_sensitive_document,
-            reset_to_demo_documents,
-            DEMO_DOCUMENTS,
-        )
-    except ImportError:
-        from vectorize_documents import (
-            build_vectorstore,
-            load_vectorstore,
-            DATA_DIR,
-            get_db_dir,
-            COLLECTION_NAME,
-        )
-        DEMO_DOCUMENTS = getattr(vectorize_documents, "DEMO_DOCUMENTS", {"sample_course_guide.pdf", "sample_doc_two.pdf"})
-        SENSITIVE_PATTERNS = getattr(
-            vectorize_documents,
-            "SENSITIVE_PATTERNS",
-            ["cv", "resume", "certificate", "offer", "vachan", "dhurishett", "codevita"]
-        )
-
-        def is_sensitive_document(filename: str) -> bool:
-            if hasattr(vectorize_documents, "is_sensitive_document"):
-                return vectorize_documents.is_sensitive_document(filename)
-            name_lower = Path(filename).name.lower()
-            return any(p in name_lower for p in SENSITIVE_PATTERNS)
-
-        def get_indexed_pdfs(data_dir: Path = DATA_DIR) -> list:
-            if hasattr(vectorize_documents, "get_indexed_pdfs"):
-                return vectorize_documents.get_indexed_pdfs(data_dir)
-            resolved_data_dir = data_dir.resolve()
-            resolved_data_dir.mkdir(parents=True, exist_ok=True)
-            valid_pdfs = []
-            for pdf_path in resolved_data_dir.glob("*.pdf"):
-                if pdf_path.resolve().parent != resolved_data_dir:
-                    continue
-                if is_sensitive_document(pdf_path.name):
-                    continue
-                valid_pdfs.append(pdf_path)
-            return sorted(valid_pdfs, key=lambda p: p.name.lower())
-
-        def reset_to_demo_documents(data_dir: Path = DATA_DIR) -> int:
-            if hasattr(vectorize_documents, "reset_to_demo_documents"):
-                return vectorize_documents.reset_to_demo_documents(data_dir)
-            resolved_data_dir = data_dir.resolve()
-            if not resolved_data_dir.exists():
-                return 0
-            removed = 0
-            for item in resolved_data_dir.iterdir():
-                if item.is_file() and item.name not in DEMO_DOCUMENTS:
-                    try:
-                        item.unlink(missing_ok=True)
-                        removed += 1
-                    except Exception:
-                        pass
-            return removed
+    from vectorize_documents import (
+        build_session_vectorstore,
+        load_session_vectorstore,
+        get_session_documents,
+        clear_session_data,
+        is_sensitive_document,
+        EMBEDDING_MODEL,
+        DEFAULT_COLLECTION_NAME,
+        get_indexed_pdfs,
+    )
 
 BASE_DIR = Path(__file__).resolve().parent
 # Load .env file directly from this project directory with override enabled
@@ -117,12 +67,25 @@ def get_groq_api_key():
             if val:
                 return str(val).strip()
     except Exception:
-        # FileNotFoundError, KeyError, or other secrets configuration errors
         pass
 
     return ""
 
 groq_api_key = get_groq_api_key()
+
+# 2. Multi-User Session Isolation Setup
+# Each visitor gets an isolated, ephemeral workspace in OS temp directory
+if "session_id" not in st.session_state:
+    st.session_state["session_id"] = str(uuid.uuid4())[:12]
+
+session_id = st.session_state["session_id"]
+SESSION_DIR = Path(tempfile.gettempdir()) / "grad_guru_sessions" / session_id
+SESSION_DOCS_DIR = SESSION_DIR / "documents"
+SESSION_DB_DIR = SESSION_DIR / "chroma_db"
+SESSION_COLLECTION = f"rag_{session_id.replace('-', '_')}"
+
+SESSION_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_DB_DIR.mkdir(parents=True, exist_ok=True)
 
 # Custom Dark Theme Styling for a sleek, modern look
 st.markdown("""
@@ -166,7 +129,15 @@ st.markdown("""
         font-size: 0.85rem;
         display: flex;
         align-items: center;
-        gap: 8px;
+        justify-content: space-between;
+    }
+    .empty-state-box {
+        padding: 24px;
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px dashed rgba(255, 255, 255, 0.15);
+        border-radius: 10px;
+        text-align: center;
+        margin: 20px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -201,11 +172,14 @@ def format_source_page(doc):
         return f" · page {page_num}"
     return ""
 
-# Check directory stats strictly within DATA_DIR
-current_pdfs = get_indexed_pdfs(DATA_DIR)
+# Check isolated session stats
+current_pdfs = get_session_documents(SESSION_DOCS_DIR)
 pdf_count = len(current_pdfs)
-active_db_dir = get_db_dir()
-index_ready = active_db_dir.exists() and any(active_db_dir.iterdir())
+index_ready = (
+    SESSION_DB_DIR.exists()
+    and any(SESSION_DB_DIR.iterdir())
+    and st.session_state.get("indexed", False)
+)
 has_api_key = bool(groq_api_key)
 
 # Sidebar: Mode Selector & Documents Panel
@@ -215,24 +189,26 @@ with st.sidebar:
         "Select Mode:",
         ["General AI Chat", "Document Chat (RAG)"],
         index=1,
-        help="General AI Chat responds directly using Groq without PDFs. Document Chat grounds answers in your indexed PDFs."
+        help="General AI Chat responds directly using Groq without PDFs. Document Chat grounds answers strictly in your uploaded PDFs."
     )
 
     st.divider()
 
     if chat_mode == "Document Chat (RAG)":
         st.subheader("📑 Documents Panel")
-        st.caption("Manage your knowledge base and vector store.")
+        st.caption("Upload text-based PDFs to create your isolated knowledge base.")
 
         # Status indicators
-        st.write(f"**Knowledge Base:** `{pdf_count}` PDF(s)")
+        st.write(f"**My Documents:** `{pdf_count}` PDF(s)")
         if index_ready:
             st.markdown('<span class="status-badge badge-online">● Vector Index Active</span>', unsafe_allow_html=True)
+        elif pdf_count > 0:
+            st.markdown('<span class="status-badge badge-neutral">○ Index Rebuild Required</span>', unsafe_allow_html=True)
         else:
-            st.markdown('<span class="status-badge badge-neutral">○ Index Not Built</span>', unsafe_allow_html=True)
+            st.markdown('<span class="status-badge badge-neutral">○ Knowledge Base Empty</span>', unsafe_allow_html=True)
 
         st.write("")
-        
+
         # Initialize uploader key in session state
         if "uploader_key" not in st.session_state:
             st.session_state["uploader_key"] = 0
@@ -253,7 +229,7 @@ with st.sidebar:
             "Upload PDF files",
             type=["pdf"],
             accept_multiple_files=True,
-            help="Upload one or more text-based PDFs to add to the knowledge base.",
+            help="Upload text-based PDFs to add to your session knowledge base.",
             label_visibility="collapsed",
             key=uploader_widget_key,
         )
@@ -272,20 +248,20 @@ with st.sidebar:
                     has_sensitive = True
                     continue
                 try:
-                    target_path = DATA_DIR / safe_name
+                    target_path = SESSION_DOCS_DIR / safe_name
                     with open(target_path, "wb") as f:
                         f.write(file.getbuffer())
                     saved_files.append(safe_name)
                 except Exception as e:
                     save_error = str(e)
 
-            # Construct one-time notification without exposing personal filenames
             messages = []
             notice_type = "info"
 
             if saved_files:
-                messages.append(f"✅ Added {len(saved_files)} valid file(s). Click Rebuild Index below.")
+                messages.append(f"✅ Added {len(saved_files)} file(s). Click **🔨 Build Index** below.")
                 notice_type = "success"
+                st.session_state["indexed"] = False
 
             if has_sensitive:
                 messages.append("⚠️ Personal documents (CVs, resumes, certificates) cannot be added to the public knowledge base and were skipped.")
@@ -308,42 +284,71 @@ with st.sidebar:
             st.session_state["uploader_key"] += 1
             st.rerun()
 
-        # Rebuild Index Button
-        if st.button("🔨 Build / Rebuild Index", type="primary", use_container_width=True):
-            try:
-                with st.status("Building vector store...", expanded=True) as status_box:
-                    def on_status(msg):
-                        st.write(f"• {msg}")
-                    vs, count_indexed, chunk_count, scanned_files, failed_files = build_vectorstore(status_callback=on_status)
-                    status_label = f"✅ Indexed {count_indexed} PDF(s) ({chunk_count} chunks)"
-                    if scanned_files:
-                        status_label += f" | {len(scanned_files)} scanned file(s) skipped"
-                    status_box.update(
-                        label=status_label,
-                        state="complete",
-                        expanded=False
-                    )
-                st.session_state["indexed"] = True
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Indexing error: {exc}")
+        # Build Index Button
+        if pdf_count > 0:
+            if st.button("🔨 Build / Rebuild Index", type="primary", use_container_width=True):
+                try:
+                    with st.status("Building vector store...", expanded=True) as status_box:
+                        def on_status(msg):
+                            st.write(f"• {msg}")
+                        vs, count_indexed, chunk_count, scanned_files, failed_files = build_session_vectorstore(
+                            docs_dir=SESSION_DOCS_DIR,
+                            db_dir=SESSION_DB_DIR,
+                            collection_name=SESSION_COLLECTION,
+                            status_callback=on_status
+                        )
+                        status_label = f"✅ Indexed {count_indexed} PDF(s) ({chunk_count} chunks)"
+                        if scanned_files:
+                            status_label += f" | {len(scanned_files)} scanned file(s) skipped"
+                        status_box.update(
+                            label=status_label,
+                            state="complete",
+                            expanded=False
+                        )
+                    st.session_state["indexed"] = True
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Indexing error: {exc}")
 
-        # Reset to Demo Documents Button
-        if st.button("🔄 Reset to Demo Documents", use_container_width=True, help="Removes any non-demo uploaded documents and reloads default sample PDFs."):
-            removed = reset_to_demo_documents(DATA_DIR)
-            try:
-                with st.spinner("Restoring demo documents and rebuilding index..."):
-                    build_vectorstore()
-                st.success(f"Reset complete. Restored demo documents ({len(DEMO_DOCUMENTS)} files).")
+        # Clear All Documents Button
+        if pdf_count > 0 or index_ready:
+            if st.button("🗑️ Clear My Documents", use_container_width=True, help="Removes all uploaded documents and clears the vector index for your session."):
+                clear_session_data(SESSION_DIR, SESSION_COLLECTION)
+                SESSION_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+                SESSION_DB_DIR.mkdir(parents=True, exist_ok=True)
+                st.session_state.messages = []
+                st.session_state.memory = ConversationBufferMemory(
+                    memory_key="chat_history", return_messages=True, output_key="answer"
+                )
+                st.session_state["indexed"] = False
+                st.success("Cleared all uploaded documents and reset session.")
                 st.rerun()
-            except Exception as exc:
-                st.error(f"Reset error: {exc}")
 
-        # Document list preview
+        # Document list preview with individual document removal
         if current_pdfs:
-            with st.expander(f"📁 Document Files ({pdf_count})", expanded=False):
+            with st.expander(f"📁 Uploaded Documents ({pdf_count})", expanded=True):
                 for p in current_pdfs:
-                    st.markdown(f'<div class="file-chip">📄 {p.name}</div>', unsafe_allow_html=True)
+                    doc_col1, doc_col2 = st.columns([4, 1])
+                    with doc_col1:
+                        st.markdown(f"📄 `{p.name}`")
+                    with doc_col2:
+                        if st.button("✕", key=f"del_{p.name}", help=f"Remove {p.name}"):
+                            try:
+                                p.unlink(missing_ok=True)
+                                st.session_state["indexed"] = False
+                                st.rerun()
+                            except Exception as del_err:
+                                st.error(f"Could not delete: {del_err}")
+
+        # Session Privacy Notice
+        with st.expander("🔒 Privacy & Multi-User Isolation", expanded=False):
+            st.caption(
+                "• **Session Isolation**: Your uploaded documents and vector index are stored "
+                "in a temporary, isolated session workspace and are not shared with other users.\n"
+                "• **Cleanup**: Click **Clear My Documents** to remove your documents and index at any time.\n"
+                "• **Notice**: Filename checks provide baseline filtering, but sensitive or confidential "
+                "documents should not be uploaded to public demo environments."
+            )
 
         st.divider()
     else:
@@ -365,19 +370,18 @@ with st.sidebar:
         st.markdown("**LLM Engine:** `openai/gpt-oss-20b` (Groq)")
         if chat_mode == "Document Chat (RAG)":
             st.markdown("**Embeddings:** `all-MiniLM-L6-v2` (Local)")
-            st.markdown(f"**Storage:** Chroma DB (`{active_db_dir.name}/`)")
-            st.markdown(f"**Collection:** `{COLLECTION_NAME}`")
+            st.markdown(f"**Session Workspace:** Isolated (`{session_id}`)")
         if has_api_key:
             st.markdown("**API Key:** Configured (`.env` / secrets)")
         else:
             st.markdown("**API Key:** Missing")
 
-# Main Interface: Compact Header
+# Main Interface: Header
 header_col1, header_col2 = st.columns([3, 1])
 with header_col1:
     st.markdown("### 📚 Multi-Document RAG Chatbot")
     mode_desc = (
-        "Document Chat: answers grounded in your indexed local PDFs."
+        "Document Chat: answers grounded strictly in your uploaded PDF documents."
         if chat_mode == "Document Chat (RAG)"
         else "General AI Chat: fast direct responses from Groq without document retrieval."
     )
@@ -398,16 +402,16 @@ st.markdown('<div class="header-container"></div>', unsafe_allow_html=True)
 if not has_api_key:
     st.warning("⚠️ **Groq API Key Required**\n\n"
                "To enable the AI assistant, please provide your Groq API key:\n"
-               "- **Local development:** Create a `.env` file in `project1_groq_multi_document_rag/` containing `GROQ_API_KEY=gsk_...`\n"
+               "- **Local development:** Create a `.env` file in the project folder containing `GROQ_API_KEY=gsk_...`\n"
                "- **Hosted deployment:** Add `GROQ_API_KEY` to your Streamlit secrets (`.streamlit/secrets.toml`).\n\n"
                "*Your key is kept safe and is never committed to Git or displayed on screen.*")
 
-# Document Mode Notice: Request PDFs or building index if not ready
+# Document Mode Notice / Empty State
 if chat_mode == "Document Chat (RAG)" and has_api_key:
     if pdf_count == 0:
-        st.info("ℹ️ **No PDFs detected in `data/` folder.** Please upload text-based PDFs using the sidebar and build the index before querying documents.")
+        st.info("📂 **No documents in your session.** Upload one or more text-based PDFs in the sidebar and click **🔨 Build / Rebuild Index** to start chatting.")
     elif not index_ready:
-        st.info("ℹ️ **Vector index not built.** Click **🔨 Build / Rebuild Index** in the sidebar to enable Document Chat.")
+        st.info("ℹ️ **Documents uploaded.** Click **🔨 Build / Rebuild Index** in the sidebar to activate retrieval.")
 
 # Session state initialization
 if "messages" not in st.session_state:
@@ -428,15 +432,22 @@ for msg in st.session_state.messages:
                     st.markdown(f"**{i}. {os.path.basename(str(source))}**{format_source_page(doc)}")
                     st.caption(doc.page_content[:400] + ("..." if len(doc.page_content) > 400 else ""))
 
-# Input placeholder text tailored to mode
-input_placeholder = (
-    "Ask a question about your documents..."
-    if chat_mode == "Document Chat (RAG)"
-    else "Ask anything (General AI mode)..."
-)
+# Input placeholder text tailored to mode and state
+if chat_mode == "General AI Chat":
+    input_placeholder = "Ask anything (General AI mode)..."
+    chat_disabled = not has_api_key
+elif pdf_count == 0:
+    input_placeholder = "Upload PDF documents in the sidebar to enable Document Chat..."
+    chat_disabled = True
+elif not index_ready:
+    input_placeholder = "Click 'Build / Rebuild Index' in the sidebar to enable Document Chat..."
+    chat_disabled = True
+else:
+    input_placeholder = "Ask a question about your uploaded documents..."
+    chat_disabled = not has_api_key
 
 # Chat Input
-question = st.chat_input(input_placeholder, disabled=not has_api_key)
+question = st.chat_input(input_placeholder, disabled=chat_disabled)
 if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
@@ -451,13 +462,11 @@ if question:
             if chat_mode == "General AI Chat":
                 # Mode 1: Direct General AI Chat (no retrieval, no PDF dependency)
                 with st.spinner("Generating answer from Groq..."):
-                    # Build conversational history from memory
                     history_messages = st.session_state.memory.chat_memory.messages
                     call_messages = list(history_messages) + [HumanMessage(content=question)]
                     response = llm.invoke(call_messages)
                     answer = response.content if hasattr(response, "content") else str(response)
-                    
-                    # Update memory for general chat
+
                     st.session_state.memory.chat_memory.add_user_message(question)
                     st.session_state.memory.chat_memory.add_ai_message(answer)
 
@@ -467,11 +476,14 @@ if question:
             else:
                 # Mode 2: Document Chat (RAG)
                 if pdf_count == 0:
-                    raise RuntimeError("No PDFs available. Please upload at least one PDF in the sidebar before asking document questions.")
+                    raise RuntimeError("No documents available. Please upload at least one PDF in the sidebar first.")
                 if not index_ready:
                     raise RuntimeError("Vector database not found. Please click '🔨 Build / Rebuild Index' in the sidebar first.")
 
-                vectorstore = load_vectorstore()
+                vectorstore = load_session_vectorstore(
+                    db_dir=SESSION_DB_DIR,
+                    collection_name=SESSION_COLLECTION
+                )
                 chain = ConversationalRetrievalChain.from_llm(
                     llm=llm,
                     retriever=vectorstore.as_retriever(search_kwargs={"k": 4}),

@@ -38,9 +38,10 @@ data/*CodeVita*.pdf
 *CodeVita*.pdf
 *Vachan*.pdf
 
-# Allow only non-sensitive demo PDFs in repository
-!data/sample_course_guide.pdf
-!data/sample_doc_two.pdf
+# Ignore all PDFs across the repository to ensure no documents are ever committed
+*.pdf
+data/*.pdf
+!data/.gitkeep
 
 # OS files
 .DS_Store
