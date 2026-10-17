@@ -1,0 +1,38 @@
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Secrets and environment variables
+.env
+.env.*
+!.env.example
+secrets.toml
+.streamlit/secrets.toml
+
+# Vector store database
+vector_db_dir/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Exclude personal / sensitive documents from git tracking
+data/Sri_Vachan_Dhurishetti_TCS_CodeVita_CV.pdf
+data/Sri vachan Dhurishetty_Certificate.pdf
+data/Ddhurishetty Sri Vachan  (1).pdf
+data/*CV*.pdf
+data/*Certificate*.pdf
+data/*Resume*.pdf
+
+# Allow only non-sensitive demo PDFs in repository
+!data/sample_course_guide.pdf
+!data/sample_doc_two.pdf
+
+# OS files
+.DS_Store
+Thumbs.db
