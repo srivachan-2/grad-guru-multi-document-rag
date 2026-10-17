@@ -12,6 +12,67 @@ LOCAL_DB_DIR = BASE_DIR / "vector_db_dir"
 COLLECTION_NAME = "grad_guru_rag"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+# Non-sensitive demo documents to preserve
+DEMO_DOCUMENTS = {
+    "sample_course_guide.pdf",
+    "sample_doc_two.pdf",
+}
+
+# Substring patterns for sensitive personal documents that must never be indexed or exposed
+SENSITIVE_PATTERNS = [
+    "cv",
+    "resume",
+    "certificate",
+    "offer",
+    "vachan",
+    "dhurishett",
+    "codevita",
+]
+
+def is_sensitive_document(filename: str) -> bool:
+    """Return True if the filename matches sensitive personal document patterns."""
+    name_lower = Path(filename).name.lower()
+    return any(p in name_lower for p in SENSITIVE_PATTERNS)
+
+def get_indexed_pdfs(data_dir: Path = DATA_DIR) -> list[Path]:
+    """
+    Scans data_dir strictly for valid, non-sensitive PDF documents.
+    Ensures documents are not silently loaded from an unintended directory.
+    """
+    resolved_data_dir = data_dir.resolve()
+    resolved_data_dir.mkdir(parents=True, exist_ok=True)
+
+    valid_pdfs = []
+    for pdf_path in resolved_data_dir.glob("*.pdf"):
+        # Prevent traversal or loading from subdirectories
+        if pdf_path.resolve().parent != resolved_data_dir:
+            continue
+        # Exclude personal CVs / sensitive files
+        if is_sensitive_document(pdf_path.name):
+            continue
+        valid_pdfs.append(pdf_path)
+
+    return sorted(valid_pdfs, key=lambda p: p.name.lower())
+
+def reset_to_demo_documents(data_dir: Path = DATA_DIR) -> int:
+    """
+    Removes any non-demo files from data_dir to restore a clean demo state.
+    Returns the count of removed files.
+    """
+    resolved_data_dir = data_dir.resolve()
+    if not resolved_data_dir.exists():
+        return 0
+
+    removed = 0
+    for item in resolved_data_dir.iterdir():
+        if item.is_file() and item.name not in DEMO_DOCUMENTS:
+            try:
+                item.unlink(missing_ok=True)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
 def get_db_dir() -> Path:
     """
     Resolve the Chroma persistent directory dynamically.
@@ -51,8 +112,7 @@ def build_vectorstore(status_callback=None):
     Extracts text from PDFs in DATA_DIR, creates chunks and embeddings,
     and updates the persistent Chroma vector store.
     """
-    DATA_DIR.mkdir(exist_ok=True)
-    pdfs = sorted(list(DATA_DIR.glob("*.pdf")), key=lambda p: p.name.lower())
+    pdfs = get_indexed_pdfs(DATA_DIR)
     if not pdfs:
         raise RuntimeError("No PDF files found in data/ folder. Please place or upload text-based PDFs before indexing.")
 
@@ -103,19 +163,18 @@ def build_vectorstore(status_callback=None):
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
     db_dir = get_db_dir()
 
-    # Rebuild safety: clear only our collection if the vectorstore exists.
-    # We do NOT remove unrelated directories or delete user documents.
+    # Rebuild safety: clear previous collections to prevent duplicate chunks or stale documents
     if db_dir.exists() and any(db_dir.iterdir()):
-        try:
-            existing_vs = Chroma(
-                collection_name=COLLECTION_NAME,
-                persist_directory=str(db_dir),
-                embedding_function=embeddings
-            )
-            existing_vs.delete_collection()
-        except Exception:
-            # Collection may not exist yet or was empty, ignore
-            pass
+        for col_name in [COLLECTION_NAME, "langchain"]:
+            try:
+                existing_vs = Chroma(
+                    collection_name=col_name,
+                    persist_directory=str(db_dir),
+                    embedding_function=embeddings,
+                )
+                existing_vs.delete_collection()
+            except Exception:
+                pass
 
     if status_callback:
         status_callback(f"Writing vector embeddings to Chroma database ({db_dir})...")

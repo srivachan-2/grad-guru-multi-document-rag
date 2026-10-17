@@ -22,6 +22,10 @@ from vectorize_documents import (
     DATA_DIR,
     get_db_dir,
     COLLECTION_NAME,
+    get_indexed_pdfs,
+    is_sensitive_document,
+    reset_to_demo_documents,
+    DEMO_DOCUMENTS,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -127,9 +131,8 @@ def format_source_page(doc):
         return f" · page {page_num}"
     return ""
 
-# Check directory stats
-DATA_DIR.mkdir(exist_ok=True)
-current_pdfs = sorted(list(DATA_DIR.glob("*.pdf")), key=lambda p: p.name.lower())
+# Check directory stats strictly within DATA_DIR
+current_pdfs = get_indexed_pdfs(DATA_DIR)
 pdf_count = len(current_pdfs)
 active_db_dir = get_db_dir()
 index_ready = active_db_dir.exists() and any(active_db_dir.iterdir())
@@ -172,17 +175,24 @@ with st.sidebar:
             saved_files = []
             errors = []
             for file in uploaded_files:
+                safe_name = os.path.basename(file.name).strip()
+                if not safe_name.lower().endswith(".pdf"):
+                    errors.append(f"'{safe_name}': Only PDF files are supported.")
+                    continue
+                if is_sensitive_document(safe_name):
+                    errors.append(f"'{safe_name}': Personal documents (CVs, resumes, certificates) cannot be added to the public knowledge base.")
+                    continue
                 try:
-                    target_path = DATA_DIR / file.name
+                    target_path = DATA_DIR / safe_name
                     with open(target_path, "wb") as f:
                         f.write(file.getbuffer())
-                    saved_files.append(file.name)
+                    saved_files.append(safe_name)
                 except Exception as e:
-                    errors.append(f"{file.name}: {e}")
+                    errors.append(f"{safe_name}: {e}")
             if saved_files:
                 st.success(f"Added {len(saved_files)} file(s). Click Rebuild Index below.")
             if errors:
-                st.error("Upload error:\n" + "\n".join(errors))
+                st.warning("Upload notice:\n" + "\n".join(errors))
 
         # Rebuild Index Button
         if st.button("🔨 Build / Rebuild Index", type="primary", use_container_width=True):
@@ -203,6 +213,17 @@ with st.sidebar:
                 st.rerun()
             except Exception as exc:
                 st.error(f"Indexing error: {exc}")
+
+        # Reset to Demo Documents Button
+        if st.button("🔄 Reset to Demo Documents", use_container_width=True, help="Removes any non-demo uploaded documents and reloads default sample PDFs."):
+            removed = reset_to_demo_documents(DATA_DIR)
+            try:
+                with st.spinner("Restoring demo documents and rebuilding index..."):
+                    build_vectorstore()
+                st.success(f"Reset complete. Restored demo documents ({len(DEMO_DOCUMENTS)} files).")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Reset error: {exc}")
 
         # Document list preview
         if current_pdfs:

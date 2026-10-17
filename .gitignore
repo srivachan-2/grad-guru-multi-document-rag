@@ -23,11 +23,20 @@ __pycache__/
 
 # Exclude personal / sensitive documents from git tracking
 data/Sri_Vachan_Dhurishetti_TCS_CodeVita_CV.pdf
+data/Sri_Vachan_Dhurishetty_TCS_CodeVita_CV.pdf
 data/Sri vachan Dhurishetty_Certificate.pdf
 data/Ddhurishetty Sri Vachan  (1).pdf
 data/*CV*.pdf
 data/*Certificate*.pdf
 data/*Resume*.pdf
+data/*Offer*.pdf
+data/*CodeVita*.pdf
+*CV*.pdf
+*Certificate*.pdf
+*Resume*.pdf
+*Offer*.pdf
+*CodeVita*.pdf
+*Vachan*.pdf
 
 # Allow only non-sensitive demo PDFs in repository
 !data/sample_course_guide.pdf
