@@ -12,6 +12,23 @@ LOCAL_DB_DIR = BASE_DIR / "vector_db_dir"
 COLLECTION_NAME = "grad_guru_rag"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+__all__ = [
+    "BASE_DIR",
+    "DATA_DIR",
+    "LOCAL_DB_DIR",
+    "COLLECTION_NAME",
+    "EMBEDDING_MODEL",
+    "DEMO_DOCUMENTS",
+    "SENSITIVE_PATTERNS",
+    "is_sensitive_document",
+    "get_indexed_pdfs",
+    "reset_to_demo_documents",
+    "get_db_dir",
+    "DB_DIR",
+    "build_vectorstore",
+    "load_vectorstore",
+]
+
 # Non-sensitive demo documents to preserve
 DEMO_DOCUMENTS = {
     "sample_course_guide.pdf",

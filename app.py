@@ -16,17 +16,87 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
-from vectorize_documents import (
-    build_vectorstore,
-    load_vectorstore,
-    DATA_DIR,
-    get_db_dir,
-    COLLECTION_NAME,
-    get_indexed_pdfs,
-    is_sensitive_document,
-    reset_to_demo_documents,
-    DEMO_DOCUMENTS,
-)
+try:
+    from vectorize_documents import (
+        build_vectorstore,
+        load_vectorstore,
+        DATA_DIR,
+        get_db_dir,
+        COLLECTION_NAME,
+        get_indexed_pdfs,
+        is_sensitive_document,
+        reset_to_demo_documents,
+        DEMO_DOCUMENTS,
+    )
+except ImportError:
+    import importlib
+    import vectorize_documents
+    try:
+        importlib.reload(vectorize_documents)
+    except Exception:
+        pass
+    try:
+        from vectorize_documents import (
+            build_vectorstore,
+            load_vectorstore,
+            DATA_DIR,
+            get_db_dir,
+            COLLECTION_NAME,
+            get_indexed_pdfs,
+            is_sensitive_document,
+            reset_to_demo_documents,
+            DEMO_DOCUMENTS,
+        )
+    except ImportError:
+        from vectorize_documents import (
+            build_vectorstore,
+            load_vectorstore,
+            DATA_DIR,
+            get_db_dir,
+            COLLECTION_NAME,
+        )
+        DEMO_DOCUMENTS = getattr(vectorize_documents, "DEMO_DOCUMENTS", {"sample_course_guide.pdf", "sample_doc_two.pdf"})
+        SENSITIVE_PATTERNS = getattr(
+            vectorize_documents,
+            "SENSITIVE_PATTERNS",
+            ["cv", "resume", "certificate", "offer", "vachan", "dhurishett", "codevita"]
+        )
+
+        def is_sensitive_document(filename: str) -> bool:
+            if hasattr(vectorize_documents, "is_sensitive_document"):
+                return vectorize_documents.is_sensitive_document(filename)
+            name_lower = Path(filename).name.lower()
+            return any(p in name_lower for p in SENSITIVE_PATTERNS)
+
+        def get_indexed_pdfs(data_dir: Path = DATA_DIR) -> list:
+            if hasattr(vectorize_documents, "get_indexed_pdfs"):
+                return vectorize_documents.get_indexed_pdfs(data_dir)
+            resolved_data_dir = data_dir.resolve()
+            resolved_data_dir.mkdir(parents=True, exist_ok=True)
+            valid_pdfs = []
+            for pdf_path in resolved_data_dir.glob("*.pdf"):
+                if pdf_path.resolve().parent != resolved_data_dir:
+                    continue
+                if is_sensitive_document(pdf_path.name):
+                    continue
+                valid_pdfs.append(pdf_path)
+            return sorted(valid_pdfs, key=lambda p: p.name.lower())
+
+        def reset_to_demo_documents(data_dir: Path = DATA_DIR) -> int:
+            if hasattr(vectorize_documents, "reset_to_demo_documents"):
+                return vectorize_documents.reset_to_demo_documents(data_dir)
+            resolved_data_dir = data_dir.resolve()
+            if not resolved_data_dir.exists():
+                return 0
+            removed = 0
+            for item in resolved_data_dir.iterdir():
+                if item.is_file() and item.name not in DEMO_DOCUMENTS:
+                    try:
+                        item.unlink(missing_ok=True)
+                        removed += 1
+                    except Exception:
+                        pass
+            return removed
 
 BASE_DIR = Path(__file__).resolve().parent
 # Load .env file directly from this project directory with override enabled
